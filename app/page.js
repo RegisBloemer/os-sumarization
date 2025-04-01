@@ -11,8 +11,8 @@ export default function Home() {
   const handleSummarize = async () => {
     setLoading(true);
     setSummary('');
+
     try {
-      // Chama a API interna do Next que repassa o request para o Ollama
       const response = await fetch('./api/sumarize', {
         method: 'POST',
         headers: {
@@ -21,23 +21,29 @@ export default function Home() {
         body: JSON.stringify({ text })
       });
 
-      if (!response.body) throw new Error("Resposta sem stream");
+      if (!response.body) {
+        throw new Error("Não há streaming body na resposta");
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
 
       let done = false;
       while (!done) {
+        // Lê o próximo chunk
         const { value, done: doneReading } = await reader.read();
         done = doneReading;
+        
         if (value) {
+          // Decodifica e adiciona ao estado
           const chunk = decoder.decode(value);
-          setSummary(prev => prev + chunk);
+          setSummary((prev) => prev + chunk);
         }
       }
     } catch (error) {
       console.error("Erro ao resumir:", error);
     }
+
     setLoading(false);
   };
 
