@@ -1,114 +1,86 @@
+// app/api/sumarize/route.js
 export async function POST(request) {
-  try {
-    console.log("Requisição recebida");
+  const { text } = await request.json();
+  const prompt = `Resuma o seguinte texto de forma clara, concisa e objetiva em português:\n"${text}"`;
 
-    // 1. Lê o JSON enviado pelo front-end
-    const { text } = await request.json();
+  const ollamaRes = await fetch("http://localhost:11434/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "qwen3:0.6b", prompt, stream: true })
+  });
+  if (!ollamaRes.ok) return new Response("Erro no Ollama", { status: ollamaRes.status });
+  if (!ollamaRes.body) throw new Error("Resposta do Ollama sem body.");
 
-    // 2. Monta o prompt
-    const prompt = `Resuma o seguinte texto de forma clara, concisa e objetiva em português, 
-mantendo apenas as informações mais importantes. Siga estas diretrizes:
-1. Seja breve, mas preserve o significado original.
-2. Evite repetições ou detalhes irrelevantes.
-3. Use frases curtas e simples.
-4. Mantenha a coerência e a lógica do texto original.
+  const reader = ollamaRes.body.getReader();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
 
-Texto para resumir: "${text}"`;
+  return new Response(new ReadableStream({
+    async start(controller) {
+      let partial = "";
+      let skippingThink = false;
 
-    // 3. Chama a API do Ollama com stream habilitado
-    const ollamaResponse = await fetch("http://localhost:11434/api/generate", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gemma3:1b", // substitua pelo nome do modelo configurado
-        prompt: prompt,
-        stream: true // IMPORTANTE: ativar streaming
-      })
-    });
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        partial += decoder.decode(value, { stream: true });
+        const lines = partial.split("\n");
+        partial = lines.pop() || "";
 
-    if (!ollamaResponse.ok) {
-      return new Response("Erro ao conectar com o Ollama", {
-        status: ollamaResponse.status,
-      });
-    }
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let json;
+          try { json = JSON.parse(line); } catch { continue; }
+          let chunk = json.response || "";
 
-    // 4. Criar uma ReadableStream para repassar ao cliente somente o texto parcial.
-    //    O Ollama, quando stream: true, envia JSONs linha a linha, no formato:
-    //    { "response": "...", "model": "...", "created_at": "...", "done": false }
-    //    Cada linha será um JSON com parte do texto em "response".
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-
-    // Verifica se a response tem body, caso contrário dá erro
-    if (!ollamaResponse.body) {
-      throw new Error("Não há body na resposta do Ollama.");
-    }
-
-    // 5. Cria a ReadableStream que converte cada chunk JSON em texto puro
-    const stream = new ReadableStream({
-      async start(controller) {
-        const reader = ollamaResponse.body.getReader();
-
-        let done = false;
-        let partialLine = "";
-
-        while (!done) {
-          const { value, done: doneReading } = await reader.read();
-          done = doneReading;
-
-          if (value) {
-            // Converte o chunk em string
-            const chunkString = decoder.decode(value);
-            // Pode vir mais de uma linha em cada chunk, então dividimos
-            const lines = (partialLine + chunkString).split("\n");
-
-            // A última linha pode estar incompleta, salvamos em partialLine
-            partialLine = lines.pop() || "";
-
-            // Para cada linha completa, extrair o JSON e pegar `response`
-            for (const line of lines) {
-              if (!line.trim()) continue; // ignora linha vazia
-
-              try {
-                const json = JSON.parse(line);
-                // Se houver texto parcial no campo `response`, enviamos ao cliente
-                if (json.response) {
-                  const textChunk = json.response;
-                  controller.enqueue(encoder.encode(textChunk));
-                }
-                // Se o Ollama indicar que finalizou (done = true), encerramos o stream
-                if (json.done) {
-                  done = true;
-                  break;
-                }
-              } catch (error) {
-                console.error("Erro fazendo parse da linha:", line, error);
+          // --- filtra tudo entre <think> e </think> ---
+          let clean = "";
+          let buf = chunk;
+          while (buf.length) {
+            if (!skippingThink) {
+              const i = buf.indexOf("<think>");
+              if (i >= 0) {
+                clean += buf.slice(0, i);
+                buf = buf.slice(i + 7);
+                skippingThink = true;
+              } else {
+                clean += buf;
+                buf = "";
+              }
+            } else {
+              const j = buf.indexOf("</think>");
+              if (j >= 0) {
+                buf = buf.slice(j + 8);
+                skippingThink = false;
+              } else {
+                // ainda dentro do think, descarta tudo
+                buf = "";
               }
             }
           }
+
+          if (clean) {
+            controller.enqueue(encoder.encode(clean));
+          }
+
+          if (json.done) {
+            controller.close();
+            return;
+          }
         }
-
-        // Se sobrou algo em partialLine, pode haver um JSON parcial. 
-        // Mas, em geral, Ollama envia `done: true` antes de fechar o stream,
-        // então normalmente não precisaríamos tratar aqui.
-
-        // Fecha o stream
-        controller.close();
       }
-    });
 
-    // 6. Retorna o stream para o front-end
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Transfer-Encoding": "chunked"
+      // sobra em partial (sem newline) — processa igual
+      if (partial) {
+        // pode repetir o mesmo filtro acima, mas normalmente partial é texto limpo
+        controller.enqueue(encoder.encode(partial));
       }
-    });
-
-  } catch (error) {
-    console.error("Erro na API:", error);
-    return new Response("Erro interno do servidor", { status: 500 });
-  }
+      controller.close();
+    }
+  }), {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Transfer-Encoding": "chunked"
+    }
+  });
 }

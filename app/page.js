@@ -1,3 +1,4 @@
+// src/app/page.jsx (ou onde estiver seu componente Home)
 'use client';
 
 import { useState, useEffect } from 'react';
@@ -17,10 +18,11 @@ import 'react-toastify/dist/ReactToastify.css';
 
 export default function Home() {
   const [text, setText] = useState('');
-  const [summary, setSummary] = useState('');
+  const [summary, setSummary] = useState('');       // usado apenas internamente
+  const [improved, setImproved] = useState('');
   const [loading, setLoading] = useState(false);
-  const [loadingMessage, setLoadingMessage] = useState('Resumindo...');
   const [hasReceivedChunk, setHasReceivedChunk] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('Analisando o texto...');
 
   const loadingMessages = [
     "Analisando o texto...",
@@ -29,81 +31,78 @@ export default function Home() {
     "Organizando ideias..."
   ];
 
+  // faz o “carrossel” durante a geração do resumo
   useEffect(() => {
-    let interval;
-    if (loading) {
-      if (!hasReceivedChunk) {
-        let index = 0;
-        setLoadingMessage(loadingMessages[index]);
-        interval = setInterval(() => {
-          index = (index + 1) % loadingMessages.length;
-          setLoadingMessage(loadingMessages[index]);
-        }, 3000); // Intervalo de 3 segundos
-      } else {
-        setLoadingMessage("Gerando Resumo");
-      }
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
+    if (!loading || hasReceivedChunk === 'verify') return;
+    let idx = 0;
+    setLoadingMessage(loadingMessages[idx]);
+    const iv = setInterval(() => {
+      idx = (idx + 1) % loadingMessages.length;
+      setLoadingMessage(loadingMessages[idx]);
+    }, 3000);
+    return () => clearInterval(iv);
   }, [loading, hasReceivedChunk]);
+
+  // helper genérico de streaming
+  const streamFetch = async ({ url, payload, onChunk }) => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) throw new Error(`Erro ${res.status}`);
+    if (!res.body) throw new Error('Sem body no stream');
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let done = false;
+    while (!done) {
+      const { value, done: d } = await reader.read();
+      done = d;
+      if (value) onChunk(decoder.decode(value));
+    }
+  };
 
   const handleSummarize = async () => {
     setLoading(true);
     setHasReceivedChunk(false);
     setSummary('');
+    setImproved('');
 
     try {
-      const response = await fetch('./api/sumarize', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ text })
+      // 1️⃣ gera o resumo (não exibido ao usuário)
+      await streamFetch({
+        url: '/api/sumarize',
+        payload: { text },
+        onChunk: chunk => {
+          if (!hasReceivedChunk) setHasReceivedChunk(true);
+          setSummary(prev => prev + chunk);
+        }
       });
 
-      if (!response.body) {
-        throw new Error("Não há streaming body na resposta");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-
-      let done = false;
-      while (!done) {
-        const { value, done: doneReading } = await reader.read();
-        done = doneReading;
-        
-        if (value) {
-          if (!hasReceivedChunk) {
-            setHasReceivedChunk(true);
-          }
-          const chunk = decoder.decode(value);
-          setSummary((prev) => prev + chunk);
+      // 2️⃣ auto-dispara verify e exibe somente ele
+      setHasReceivedChunk('verify');
+      setLoadingMessage('Verificando resumo...');
+      await streamFetch({
+        url: '/api/verify',
+        payload: { text, summary },
+        onChunk: chunk => {
+          setImproved(prev => prev + chunk);
         }
-      }
-    } catch (error) {
-      console.error("Erro ao resumir:", error);
-    }
+      });
 
-    setLoading(false);
+      toast.success('Resumo pronto!');
+    } catch (err) {
+      console.error(err);
+      toast.error('Erro no processamento.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleCopySummary = () => {
-    navigator.clipboard.writeText(summary)
-      .then(() => {
-        toast.success("Seu resumo está pronto!", {
-          position: "top-right",
-          autoClose: 3000,
-          hideProgressBar: false,
-          closeOnClick: true,
-          pauseOnHover: true,
-          draggable: true,
-        });
-      })
-      .catch((err) => {
-        console.error("Erro ao copiar resumo:", err);
-      });
+  const handleCopy = () => {
+    navigator.clipboard.writeText(improved)
+      .then(() => toast.success('Resumo copiado!'))
+      .catch(console.error);
   };
 
   return (
@@ -114,16 +113,13 @@ export default function Home() {
 
       <Card>
         <CardContent>
-          <Typography variant="subtitle1" gutterBottom>
-            Digite ou cole seu texto abaixo:
-          </Typography>
           <TextField
             label="Texto"
             multiline
             rows={8}
             fullWidth
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={e => setText(e.target.value)}
             variant="outlined"
             margin="normal"
           />
@@ -135,35 +131,33 @@ export default function Home() {
             >
               {loading ? (
                 <>
-                  <CircularProgress size={20} sx={{ mr: 1 }} />
+                  <CircularProgress size={20} sx={{ mr:1 }} />
                   {loadingMessage}
                 </>
-              ) : (
-                'Resumir'
-              )}
+              ) : 'Resumir'}
             </Button>
           </Box>
         </CardContent>
       </Card>
 
-      <Box mt={4}>
-        <Typography variant="h6" gutterBottom>
-          Resumo:
-        </Typography>
-        <Paper sx={{ p: 2, minHeight: '100px' }}>
-          <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
-            {summary}
-          </Typography>
-        </Paper>
-        {summary && (
-          <Box mt={2} display="flex" justifyContent="center">
-            <Button variant="outlined" onClick={handleCopySummary}>
+      {improved && (
+        <Box mt={4}>
+          <Typography variant="h6">Resumo:</Typography>
+          <Paper sx={{ p:2, minHeight:'100px' }}>
+            <Typography sx={{ whiteSpace:'pre-wrap' }}>
+              {improved}
+            </Typography>
+          </Paper>
+          <Box mt={1} display="flex" justifyContent="center">
+            <Button variant="outlined" onClick={handleCopy}>
               Copiar Resumo
             </Button>
           </Box>
-        )}
-      </Box>
-      <ToastContainer />
+        </Box>
+      )}
+
+      <ToastContainer position="top-right" autoClose={3000} />
     </Container>
   );
 }
+  
