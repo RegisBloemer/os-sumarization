@@ -11,7 +11,13 @@ import {
   Card,
   CardContent,
   Paper,
-  CircularProgress
+  CircularProgress,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Chip,
+  Divider
 } from '@mui/material';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
@@ -23,6 +29,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [hasReceivedChunk, setHasReceivedChunk] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('Analisando o texto...');
+  
+  // Novos estados para as funcionalidades adicionais
+  const [showBothVersions, setShowBothVersions] = useState(false);
+  const [resumeStyle, setResumeStyle] = useState('balanced');
+  const [resumeLength, setResumeLength] = useState('medium');
+  const [selectedText, setSelectedText] = useState('');
 
   const loadingMessages = [
     "Analisando o texto...",
@@ -67,35 +79,85 @@ export default function Home() {
     setHasReceivedChunk(false);
     setSummary('');
     setImproved('');
-
+    setSelectedText(''); // Reset any selected text
+  
     try {
       // 1️⃣ gera o resumo (não exibido ao usuário)
       await streamFetch({
         url: '/api/sumarize',
-        payload: { text },
+        payload: { 
+          text,
+          style: resumeStyle,
+          length: resumeLength 
+        },
         onChunk: chunk => {
           if (!hasReceivedChunk) setHasReceivedChunk(true);
           setSummary(prev => prev + chunk);
         }
       });
-
+  
       // 2️⃣ auto-dispara verify e exibe somente ele
       setHasReceivedChunk('verify');
       setLoadingMessage('Verificando resumo...');
       await streamFetch({
         url: '/api/verify',
-        payload: { text, summary },
+        payload: { 
+          text, 
+          summary,
+          style: resumeStyle,
+          length: resumeLength 
+        },
         onChunk: chunk => {
           setImproved(prev => prev + chunk);
         }
       });
-
+  
       toast.success('Resumo pronto!');
     } catch (err) {
       console.error(err);
       toast.error('Erro no processamento.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleImproveSection = async () => {
+    if (!selectedText) return;
+    
+    setLoading(true);
+    try {
+      let improvedSection = '';
+      
+      await streamFetch({
+        url: '/api/improve-section',
+        payload: { 
+          text,
+          fullSummary: improved,
+          selectedSection: selectedText 
+        },
+        onChunk: chunk => {
+          improvedSection += chunk;
+        }
+      });
+      
+      // Substitui o trecho selecionado pelo trecho melhorado
+      const newImproved = improved.replace(selectedText, improvedSection);
+      setImproved(newImproved);
+      
+      toast.success('Trecho melhorado com sucesso!');
+      setSelectedText('');
+    } catch (err) {
+      console.error(err);
+      toast.error('Erro ao melhorar o trecho.');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const handleTextSelection = () => {
+    const selection = window.getSelection();
+    if (selection && selection.toString().trim()) {
+      setSelectedText(selection.toString().trim());
     }
   };
 
@@ -110,7 +172,7 @@ export default function Home() {
       <Typography variant="h4" align="center" gutterBottom>
         Resumidor de Texto
       </Typography>
-
+  
       <Card>
         <CardContent>
           <TextField
@@ -123,6 +185,36 @@ export default function Home() {
             variant="outlined"
             margin="normal"
           />
+          
+          {/* Opções de personalização (Item 3) */}
+          <Box sx={{ display: 'flex', gap: 2, mt: 2, mb: 2 }}>
+            <FormControl size="small" fullWidth>
+              <InputLabel>Estilo</InputLabel>
+              <Select 
+                value={resumeStyle} 
+                onChange={(e) => setResumeStyle(e.target.value)}
+                label="Estilo"
+              >
+                <MenuItem value="balanced">Equilibrado</MenuItem>
+                <MenuItem value="academic">Acadêmico</MenuItem>
+                <MenuItem value="simple">Simplificado</MenuItem>
+              </Select>
+            </FormControl>
+            
+            <FormControl size="small" fullWidth>
+              <InputLabel>Tamanho</InputLabel>
+              <Select 
+                value={resumeLength} 
+                onChange={(e) => setResumeLength(e.target.value)}
+                label="Tamanho"
+              >
+                <MenuItem value="short">Curto</MenuItem>
+                <MenuItem value="medium">Médio</MenuItem>
+                <MenuItem value="detailed">Detalhado</MenuItem>
+              </Select>
+            </FormControl>
+          </Box>
+          
           <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
             <Button
               variant="contained"
@@ -139,15 +231,76 @@ export default function Home() {
           </Box>
         </CardContent>
       </Card>
-
+  
       {improved && (
         <Box mt={4}>
-          <Typography variant="h6">Resumo:</Typography>
+          <Box display="flex" alignItems="center" mb={1}>
+            <Typography variant="h6" sx={{ flexGrow: 1 }}>
+              Resumo:
+            </Typography>
+            {/* Botão para mostrar/ocultar versão original (Item 2) */}
+            <Button 
+              size="small" 
+              variant="outlined"
+              onClick={() => setShowBothVersions(!showBothVersions)}
+            >
+              {showBothVersions ? "Ocultar Original" : "Mostrar Ambos"}
+            </Button>
+          </Box>
+          
+          {/* Exibe resumo original quando solicitado (Item 2) */}
+          {showBothVersions && (
+            <Paper sx={{ p:2, mb:2, bgcolor: '#f5f5f5' }}>
+              <Typography variant="subtitle2" color="textSecondary" gutterBottom>
+                Versão inicial:
+              </Typography>
+              <Typography sx={{ whiteSpace:'pre-wrap' }}>
+                {summary}
+              </Typography>
+            </Paper>
+          )}
+          
+          {/* Resumo melhorado com suporte para seleção de texto (Item 4) */}
           <Paper sx={{ p:2, minHeight:'100px' }}>
-            <Typography sx={{ whiteSpace:'pre-wrap' }}>
+            <Typography variant="subtitle2" color="textSecondary" gutterBottom>
+              {showBothVersions ? "Versão final:" : ""}
+            </Typography>
+            <Typography 
+              sx={{ whiteSpace:'pre-wrap' }}
+              onMouseUp={handleTextSelection}
+            >
               {improved}
             </Typography>
+            
+            {/* Interface de feedback para texto selecionado (Item 4) */}
+            {selectedText && (
+              <Box mt={2} p={1} border="1px dashed #ccc" borderRadius={1}>
+                <Typography variant="body2" color="textSecondary" gutterBottom>
+                  Trecho selecionado:
+                </Typography>
+                <Typography variant="body2" fontStyle="italic" gutterBottom>
+                  "{selectedText}"
+                </Typography>
+                <Box mt={1} display="flex" gap={1}>
+                  <Button 
+                    size="small" 
+                    variant="outlined"
+                    onClick={handleImproveSection}
+                    disabled={loading}
+                  >
+                    Melhorar este trecho
+                  </Button>
+                  <Button 
+                    size="small"
+                    onClick={() => setSelectedText('')}
+                  >
+                    Cancelar
+                  </Button>
+                </Box>
+              </Box>
+            )}
           </Paper>
+          
           <Box mt={1} display="flex" justifyContent="center">
             <Button variant="outlined" onClick={handleCopy}>
               Copiar Resumo
@@ -155,7 +308,7 @@ export default function Home() {
           </Box>
         </Box>
       )}
-
+  
       <ToastContainer position="top-right" autoClose={3000} />
     </Container>
   );
